@@ -156,11 +156,12 @@ jobs:
         env:
           RAW_TEST_TYPE: ${{ inputs.test_type }}
         run: |
-          # resolve_test_type.sh maps tier aliases AND validates the result:
-          # it exits 1 with an ::error:: line if the type is unknown, so this
-          # step does not re-check the valid set. Single source of truth for
-          # the vocabulary is that script (shared with the Makefile).
-          RESOLVED_TEST_TYPE="$(scripts/resolve_test_type.sh "${RAW_TEST_TYPE}")"
+          # `make print-test-type` applies the Makefile's default (empty ->
+          # regression) and validates the result: it exits non-zero with an
+          # ::error:: line if the type is unknown, so this step does not
+          # re-check the valid set. Single source of truth for the
+          # vocabulary is the Makefile.
+          RESOLVED_TEST_TYPE="$(make -s print-test-type TEST_TYPE="${RAW_TEST_TYPE}")"
           echo "resolved_test_type=${RESOLVED_TEST_TYPE}" >> "$GITHUB_OUTPUT"
 
   test:
@@ -276,15 +277,15 @@ jobs:
           RAW_TEST_TYPE: ${{ inputs.test_type }}
         run: |
           # Apply the shared default (empty -> regression) and validate via
-          # the shared script -- same source of truth as the Makefile's
-          # TEST_TYPE resolution, the single choke point every caller
-          # (Jenkins, config.yaml) passes through. The script also rejects an
-          # unknown type (exit 1 with an ::error:: line): type: choice guards
-          # the workflow_dispatch entrypoint, but this reusable workflow_call
-          # path accepts any string, and an unknown value would match no
-          # config and silently skip every job -> a green run that tested
-          # nothing.
-          RESOLVED_TEST_TYPE="$(scripts/resolve_test_type.sh "${RAW_TEST_TYPE}")"
+          # `make print-test-type` -- the Makefile is the single source of
+          # truth for TEST_TYPE resolution, the single choke point every
+          # caller (Jenkins, config.yaml) passes through. It also rejects an
+          # unknown type (non-zero exit with an ::error:: line): type: choice
+          # guards the workflow_dispatch entrypoint, but this reusable
+          # workflow_call path accepts any string, and an unknown value would
+          # match no config and silently skip every job -> a green run that
+          # tested nothing.
+          RESOLVED_TEST_TYPE="$(make -s print-test-type TEST_TYPE="${RAW_TEST_TYPE}")"
           # Expose the resolved type so the perf job (which is NOT one of the
           # matrix.cfg entries) can gate itself on it -- same pattern as the
           # sibling torch-spyre workflow's generate_matrix.resolved_test_type.
