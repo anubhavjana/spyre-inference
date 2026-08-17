@@ -4,7 +4,7 @@ name: Test matrix (reusable)
 # Reusable workflow — not triggered directly. Defines the build + the 6-config
 # test matrix once; two entrypoints call it with the same tests but slightly
 # different setup:
-#
+#  one line added
 #   test_each_commit.yaml (push/PR/merge_group): skip_if_no_changes=true, so the
 #     build/test only runs when source files changed. Installs the locked
 #     baseline RPMs (spyre-rpm-install) and runs on the standing image.
