@@ -412,6 +412,13 @@ jobs:
           uv pip show torch
           uv pip freeze
 
+      - name: Activate the freshly-built venv
+        if: ${{ steps.gate.outputs.run == 'true' }}
+        # Ephemeral -dev-image runners inherit a stale $VIRTUAL_ENV; repoint it so `uv run --active` (Makefile:153) uses the venv just built here, not the baked one.
+        run: |
+          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
+          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
+
       # Slim the cache for setup-uv's post-job save without discarding the
       # compiled torch-spyre/vllm wheels. Must run after the build's uv sync.
       - name: Prune uv cache (safe)
