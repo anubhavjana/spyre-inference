@@ -52,6 +52,7 @@ overrides = [
     { name = "torchvision", marker = "sys_platform == 'never'", index = "https://download.pytorch.org/whl/cpu" },
     { name = "triton", marker = "sys_platform == 'never'" },
 ]
+build-constraints = [{ name = "cython", specifier = ">=3.0,<3.1" }]
 
 [[manifest.dependency-metadata]]
 name = "torch"
