@@ -310,6 +310,8 @@ jobs:
     # When inputs.runner_label is set (per-PR dispatch flow), it replaces
     # the standing image label with the per-PR image label.
     runs-on: ${{ fromJSON(format('["{0}","{1}"]', join(matrix.runs_on, '","'), inputs.runner_label || matrix.image_label)) }}
+    # Don't let one failed config fail this job outright -- test_result decides pass/fail after test_retry gets a shot on a fresh pod.
+    continue-on-error: true
     timeout-minutes: 720
     env:
       # The CI env var is very important.
@@ -546,6 +548,250 @@ jobs:
           reporter: java-junit
           fail-on-error: false
 
+      # Records this leg's matrix entry as a uniquely-named artifact so collect_failed_suites can rebuild a retry matrix without needing this job's own (continue-on-error-muddied) conclusion.
+      - name: Save suite descriptor for pod-level retry
+        if: failure()
+        run: |
+          mkdir -p "${RUNNER_TEMP}/failed_suite"
+          cat > "${RUNNER_TEMP}/failed_suite/suite.json" <<'JSONEOF'
+          ${{ toJSON(matrix) }}
+          JSONEOF
+
+      # github.run_attempt in the name: the artifacts REST API is run-scoped,
+      # not attempt-scoped, so a re-run's descriptors from a prior attempt
+      # would otherwise retry a suite that already passed.
+      - name: Upload failed-suite descriptor
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-suite-${{ github.run_attempt }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/failed_suite/suite.json
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Collect suites that need a pod-level retry -- reads the failed-suite-*
+  # artifacts uploaded above and rebuilds a retry matrix (the same
+  # {include: [...]} shape as the `test` job's matrix) for test_retry below to
+  # consume via fromJSON.
+  # ---------------------------------------------------------------------------
+  collect_failed_suites:
+    name: Collect suites for pod-level retry
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.collect.outputs.matrix }}
+      has_failed: ${{ steps.collect.outputs.has_failed }}
+    steps:
+      - name: Download failed-suite descriptors and build retry matrix
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p failed_suites
+          # --paginate: the artifacts endpoint defaults to 30/page. The
+          # startswith filter scopes to this run_attempt only, so a re-run
+          # doesn't retry a suite that already passed on an earlier attempt.
+          ATTEMPT="${{ github.run_attempt }}"
+          ARTIFACTS=$(gh api --paginate \
+            "/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?per_page=100" \
+            --jq ".artifacts[] | select(.name | startswith(\"failed-suite-${ATTEMPT}-\")) | {id: .id, name: .name}" \
+            | python3 -c "import json,sys; print(json.dumps([json.loads(l) for l in sys.stdin if l.strip()]))")
+
+          ARTIFACTS="$ARTIFACTS" python3 <<'PYEOF'
+          import json, os, subprocess
+          artifacts = json.loads(os.environ['ARTIFACTS'])
+          repo = "${{ github.repository }}"
+          for a in artifacts:
+              result = subprocess.run(
+                  ["gh", "api", f"/repos/{repo}/actions/artifacts/{a['id']}/zip"],
+                  capture_output=True, check=True,
+              )
+              out_dir = f"failed_suites/{a['name']}"
+              os.makedirs(out_dir, exist_ok=True)
+              zip_path = f"{out_dir}.zip"
+              with open(zip_path, "wb") as f:
+                  f.write(result.stdout)
+              subprocess.run(["unzip", "-q", "-o", zip_path, "-d", out_dir], check=True)
+          print(f"Downloaded {len(artifacts)} failed-suite descriptor(s).")
+          PYEOF
+
+          python3 <<'PYEOF'
+          import glob, json, os
+
+          suites = []
+          for path in sorted(glob.glob("failed_suites/failed-suite-*/suite.json")):
+              with open(path) as f:
+                  suites.append(json.load(f))
+
+          print(f"Suites to retry: {[s.get('cfg') for s in suites]}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"matrix={json.dumps({'include': suites})}\n")
+              f.write(f"has_failed={'true' if suites else 'false'}\n")
+          PYEOF
+
+  # ---------------------------------------------------------------------------
+  # Pod-level retry -- re-runs, on a brand-new runner pod, exactly the configs
+  # collect_failed_suites found failed; mirrors the `test` job's build+test
+  # steps (skipping the changed-files gate, since a config picked up here is
+  # already known to need running). No further looping: a config that fails
+  # again here is a genuine failure.
+  # ---------------------------------------------------------------------------
+  test_retry:
+    name: 'build and run tests (${{ matrix.cfg }}) (pod-level retry)'
+    needs: collect_failed_suites
+    if: ${{ !cancelled() && needs.collect_failed_suites.outputs.has_failed == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.collect_failed_suites.outputs.matrix) }}
+    runs-on: ${{ fromJSON(format('["{0}","{1}"]', join(matrix.runs_on, '","'), inputs.runner_label || matrix.image_label)) }}
+    timeout-minutes: 720
+    env:
+      CI: ''
+      STORAGE_1_DIR: /storage-1/spyre-inference
+      HF_HOME: /storage-1/spyre-inference/.cache/huggingface
+      HF_HUB_OFFLINE: '1'
+      HBM_POOL_PLANNING: '0'
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install Spyre RPMs
+        if: ${{ !inputs.use_prebaked_image }}
+        uses: ./.github/actions/spyre-rpm-install
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
+            spyre-rpms.lock
+          cache-local-path: ${{ runner.temp }}/setup-uv-cache
+          prune-cache: false
+          save-cache: ${{ github.event_name != 'merge_group' }}
+
+      - name: Install override Spyre RPMs
+        if: ${{ inputs.rpm_names != '' }}
+        uses: ./.github/actions/override-spyre-rpms
+        with:
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_TOKEN }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          runner_labels: ${{ format('["{0}","{1}"]', join(matrix.runs_on, '","'), inputs.runner_label || matrix.image_label) }}
+
+      - name: Dump UV cache info
+        run: |
+          find "$(uv cache dir)" -name '*.whl' -printf '%f\n' | sort -u
+
+      - name: Build spyre-inference
+        if: ${{ !inputs.use_prebaked_image }}
+        env:
+          TORCH_SPYRE_REF: "${{ inputs.torch_spyre_ref }}"
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          if [[ -n "$TORCH_SPYRE_REF" ]]; then
+            uv add --frozen \
+              "torch-spyre @ git+https://github.com/torch-spyre/torch-spyre@${TORCH_SPYRE_REF}"
+            uv sync --verbose --group dev
+          else
+            uv sync --frozen --verbose --group dev
+          fi
+          uv pip show torch
+          uv pip freeze
+
+      - name: Activate the freshly-built venv
+        if: ${{ !inputs.use_prebaked_image }}
+        run: |
+          rm -rf /home/senuser/.venv
+          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
+          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Prune uv cache (safe)
+        if: ${{ github.event_name != 'merge_group' }}
+        uses: ./.github/actions/prune-uv-cache-safe
+
+      - name: Ensure public HF models cached
+        env:
+          HF_HUB_OFFLINE: '0'
+        run: uv run .github/cache_config/manage_cache.py --public
+
+      - name: Use a job-scoped torch inductor compile cache dir
+        run: echo "TORCHINDUCTOR_CACHE_DIR=${RUNNER_TEMP}/inductor-cache-retry-${{ strategy.job-index }}-${{ github.run_id }}" >> "$GITHUB_ENV"
+
+      - name: Run tests (pod-level retry)
+        timeout-minutes: 90
+        run: |
+          echo "Running tests for config: ${{ matrix.cfg }} (pod-level retry)..."
+          make ${{ matrix.test_target }} COVERAGE=1 JUNIT_XML=junit-${{ matrix.test_target }}.xml
+          echo "tests done"
+
+      - name: Upload coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-retry-${{ strategy.job-index }}
+          path: .coverage.*
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # overwrite: true replaces the failed first attempt's report (same name) so downstream consumers see only the corrected result.
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.test_target }}
+          path: junit-${{ matrix.test_target }}.xml
+          retention-days: 14
+          overwrite: true
+
+      - name: Publish JUnit test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: 'Test report (${{ matrix.cfg }}) (pod-level retry)'
+          path: junit-${{ matrix.test_target }}.xml
+          reporter: java-junit
+          fail-on-error: false
+
+  # ---------------------------------------------------------------------------
+  # Test matrix result -- decides pass/fail for the `test` matrix (which is
+  # continue-on-error and always reports "success") by inspecting the
+  # pod-level retry outcome instead. Callers' fan-in gate depends on this
+  # reusable workflow's overall conclusion, which this job's own (non-
+  # continue-on-error) result determines.
+  # ---------------------------------------------------------------------------
+  test_result:
+    name: Test matrix result
+    needs: [collect_failed_suites, test_retry]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate combined result
+        run: |
+          echo "Suites retried: ${{ needs.collect_failed_suites.outputs.has_failed }}"
+          echo "test_retry result: ${{ needs.test_retry.result }}"
+          if [[ "${{ needs.collect_failed_suites.outputs.has_failed }}" == "true" && \
+                "${{ needs.test_retry.result }}" != "success" ]]; then
+            echo "::error::One or more configs still failed after pod-level retry."
+            exit 1
+          fi
+          echo "All configs passed (directly or after pod-level retry)."
+
   # ---------------------------------------------------------------------------
   # Coverage fan-in: combine every job's data into one report. Stock runner
   # (needs only the coverage tool + a checkout for .coveragerc and the sources).
@@ -554,7 +800,7 @@ jobs:
   # ---------------------------------------------------------------------------
   coverage:
     name: Aggregate coverage
-    needs: test
+    needs: [test, test_retry]
     if: always()
     # Informational -- must never fail the reusable workflow (and thus the
     # callers' required-check gate).
