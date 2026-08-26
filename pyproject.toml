@@ -81,11 +81,11 @@ override-dependencies = [
 
     # requests is used by many dependencies, make sure it's patched for CVEs
     "requests>=2.32.4",
-]
 
-# pyzmq (transitive vllm dep, built from sdist) declares "cython>=3.0.0" unbounded, but Cython 3.1 breaks its bundled zmq/backend/cython/_zmq.py -- pin it for all builds, incl. `uv sync` (no CLI equivalent).
-build-constraint-dependencies = [
-    "cython>=3.0,<3.1",
+    # pyzmq (transitive vllm dep, built from sdist on ppc64le/s390x) <27.2.0 fails to build
+    # against Cython 3.2+ (its bundled zmq/backend/cython/_zmq.py has Cython-invalid
+    # redeclarations); 27.2.0 fixed the generated code. vllm only requires pyzmq>=25.0.0.
+    "pyzmq>=27.2.0",
 ]
 
 # This ensures that we build vLLM with no device-specific C kernels (empty backend).
