@@ -584,53 +584,17 @@ jobs:
       matrix: ${{ steps.collect.outputs.matrix }}
       has_failed: ${{ steps.collect.outputs.has_failed }}
     steps:
+      - name: Checkout scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+
       - name: Download failed-suite descriptors and build retry matrix
         id: collect
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p failed_suites
-          # --paginate: the artifacts endpoint defaults to 30/page. The
-          # startswith filter scopes to this run_attempt only, so a re-run
-          # doesn't retry a suite that already passed on an earlier attempt.
-          ATTEMPT="${{ github.run_attempt }}"
-          ARTIFACTS=$(gh api --paginate \
-            "/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?per_page=100" \
-            --jq ".artifacts[] | select(.name | startswith(\"failed-suite-${ATTEMPT}-\")) | {id: .id, name: .name}" \
-            | python3 -c "import json,sys; print(json.dumps([json.loads(l) for l in sys.stdin if l.strip()]))")
-
-          ARTIFACTS="$ARTIFACTS" python3 <<'PYEOF'
-          import json, os, subprocess
-          artifacts = json.loads(os.environ['ARTIFACTS'])
-          repo = "${{ github.repository }}"
-          for a in artifacts:
-              result = subprocess.run(
-                  ["gh", "api", f"/repos/{repo}/actions/artifacts/{a['id']}/zip"],
-                  capture_output=True, check=True,
-              )
-              out_dir = f"failed_suites/{a['name']}"
-              os.makedirs(out_dir, exist_ok=True)
-              zip_path = f"{out_dir}.zip"
-              with open(zip_path, "wb") as f:
-                  f.write(result.stdout)
-              subprocess.run(["unzip", "-q", "-o", zip_path, "-d", out_dir], check=True)
-          print(f"Downloaded {len(artifacts)} failed-suite descriptor(s).")
-          PYEOF
-
-          python3 <<'PYEOF'
-          import glob, json, os
-
-          suites = []
-          for path in sorted(glob.glob("failed_suites/failed-suite-*/suite.json")):
-              with open(path) as f:
-                  suites.append(json.load(f))
-
-          print(f"Suites to retry: {[s.get('cfg') for s in suites]}")
-
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"matrix={json.dumps({'include': suites})}\n")
-              f.write(f"has_failed={'true' if suites else 'false'}\n")
-          PYEOF
+        run: python3 .github/scripts/collect_failed_suites.py
 
   # ---------------------------------------------------------------------------
   # Pod-level retry -- re-runs, on a brand-new runner pod, exactly the configs
