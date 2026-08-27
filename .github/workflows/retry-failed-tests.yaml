@@ -1,0 +1,70 @@
+name: retry-failed-tests
+
+# On failure of test_each_commit, reruns the failed jobs via `gh run rerun
+# --failed` so ARC gives them a fresh pod/card. This targets the SAME run
+# (a new run_attempt), so the PR's existing check updates in place -- no
+# duplicate job definitions, no separate check to reconcile.
+# Separate workflow_run workflow, like push-to-clickhouse.yaml (gh run rerun
+# needs a completed run; workflow_run keeps base-repo perms for fork PRs).
+on:
+  workflow_run:
+    workflows:
+      - test_each_commit
+    types: [completed]
+
+concurrency:
+  # One retry decision per triggering run; never cancel a rerun in flight.
+  group: retry-failed-tests-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write # required by `gh run rerun`
+
+jobs:
+  retry:
+    name: Retry failed jobs on a fresh pod
+    # Cardless pool (like push-to-clickhouse.yaml's ingest job) -- only calls the GitHub API.
+    runs-on:
+      - x86_64
+      - linux
+      - image_ingest
+    # Only on an actual failure (not cancelled/superseded); run_attempt < 2 caps this at one retry.
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.run_attempt < 2
+    steps:
+      - name: Install gh CLI
+        env:
+          # Offline floor only: used when api.github.com can't be reached to resolve the
+          # latest release, so a transient API failure degrades to a known-good gh instead
+          # of failing the job.
+          GH_CLI_VERSION_FLOOR: 2.98.0
+        run: |
+          set -euo pipefail
+          # Track the latest gh release rather than a pin: nothing here depends on a
+          # specific gh version, and a pin silently rots.
+          ver="$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest \
+                   | jq -r '.tag_name // empty' | sed 's/^v//')" || ver=""
+          if [ -z "$ver" ]; then
+            echo "api.github.com unreachable; flooring to ${GH_CLI_VERSION_FLOOR}"
+            ver="${GH_CLI_VERSION_FLOOR}"
+          fi
+          # curl, not wget: the ingest runner image ships curl but no wget.
+          curl -fsSL "https://github.com/cli/cli/releases/download/v${ver}/gh_${ver}_linux_amd64.tar.gz" \
+            -o gh.tar.gz
+          tar -xzf gh.tar.gz
+          echo "$PWD/gh_${ver}_linux_amd64/bin" >> "${GITHUB_PATH}"
+          "gh_${ver}_linux_amd64/bin/gh" --version
+
+      - name: Rerun failed jobs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Triggering workflow : ${{ github.event.workflow_run.name }}"
+          echo "Run                 : ${{ github.event.workflow_run.id }} (attempt ${{ github.event.workflow_run.run_attempt }})"
+          echo "Conclusion          : ${{ github.event.workflow_run.conclusion }}"
+          echo "Rerunning failed jobs on a fresh pod..."
+          gh run rerun "${{ github.event.workflow_run.id }}" \
+            --repo "${{ github.repository }}" \
+            --failed
