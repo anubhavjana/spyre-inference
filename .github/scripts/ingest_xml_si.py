@@ -420,7 +420,8 @@ def main():
         run_id = _threaded_run_id(args) or str(uuid.uuid4())
 
         # Dedup on (run_id, filename): a re-ingest of the SAME test run must be idempotent,
-        # but two distinct runs must never collapse. runner_run_id mirrors run_id for a Jenkins/standalone leg, so it's only an independent signal for a GHA numeric id.
+        # but two distinct runs must never collapse. runner_run_id mirrors run_id for a
+        # Jenkins/standalone leg, so it's only an independent signal for a GHA numeric id.
         runner_run_id = _runner_run_id(args, run_id)
         existing = client.query(
             "SELECT count() FROM si_test_runs "
