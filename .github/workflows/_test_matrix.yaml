@@ -5,6 +5,7 @@ name: Test matrix (reusable)
 # test matrix once; two entrypoints call it with the same tests but slightly
 # different setup:
 #
+#
 #   test_each_commit.yaml (push/PR/merge_group): skip_if_no_changes=true, so the
 #     build/test only runs when source files changed. Installs the locked
 #     baseline RPMs (spyre-rpm-install) on the standing image, so every PR
