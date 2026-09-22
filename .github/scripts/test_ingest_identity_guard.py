@@ -68,15 +68,20 @@ def test_vllm_goldens_hold_against_the_installed_library(vllm_mod):
 
 def test_every_golden_names_its_function_and_both_values(vllm_mod):
     # The message is the whole output of a drift: it has to say which hash moved and to what,
-    # or the on-call reader cannot tell a rename from a re-key.
-    (line,) = golden_drift([(vllm_mod.run_id_of, ("gha", "1", "amd64", "perf"), "nope")])
+    # or the on-call reader cannot tell a rename from a re-key. The NAME is a caller-supplied
+    # label, not fn.__name__: the library re-exports every identity function as a bound
+    # `<Class>.derive`, so introspecting the callable would make every drift message read
+    # "derive" and tell the reader nothing.
+    (line,) = golden_drift(
+        [("run_id_of", vllm_mod.run_id_of, ("gha", "1", "amd64", "perf"), "nope")]
+    )
     assert "run_id_of" in line and "nope" in line
     assert str(vllm_mod.run_id_of("gha", "1", "amd64", "perf")) in line
 
 
 def test_a_renamed_or_re_keyed_function_is_drift(vllm_mod):
-    assert golden_drift([(vllm_mod.canonical_arch, ("amd64",), "x86_64")]) == []
-    assert golden_drift([(vllm_mod.canonical_arch, ("amd64",), "amd64")]) != []
+    assert golden_drift([("canonical_arch", vllm_mod.canonical_arch, ("amd64",), "x86_64")]) == []
+    assert golden_drift([("canonical_arch", vllm_mod.canonical_arch, ("amd64",), "amd64")]) != []
 
 
 # --- provenance -------------------------------------------------------------------------
@@ -163,7 +168,7 @@ def test_intact_goldens_let_the_v2_write_through(vllm_mod, monkeypatch):
 def test_drift_takes_out_v2_and_leaves_the_flat_tables(vllm_mod, monkeypatch):
     # Refusing is the point: rows minted by a library nobody else is running would be
     # orphans, and an orphan reads downstream as "no perf ran".
-    broken = ((vllm_mod.run_id_of, ("gha", "1", "amd64", "perf"), "not-the-id"),)
+    broken = (("run_id_of", vllm_mod.run_id_of, ("gha", "1", "amd64", "perf"), "not-the-id"),)
     written = _run_ingest(vllm_mod, monkeypatch, broken)
     assert "spyre_v2" not in written
     assert None in written, "results_v3 / run_metadata must still be written"
