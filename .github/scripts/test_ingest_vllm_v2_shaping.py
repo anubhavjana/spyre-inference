@@ -238,7 +238,9 @@ def test_run_id_and_report_kind_are_stamped_on_every_fact_row(mod):
 # --- _write_artifact_results: duration_s (was hardcoded 0.0 for every GHA perf leg) ----
 
 
-def _artifact_write(mod, rows, monkeypatch, lock_lines=("ibm-flex-1.2.3-0.next.abc123def456.el10.x86_64.rpm",)):
+def _artifact_write(
+    mod, rows, monkeypatch, lock_lines=("ibm-flex-1.2.3-0.next.abc123def456.el10.x86_64.rpm",)
+):
     """Run the real _write_artifact_results over these flat rows; return its inserted rows."""
     import tempfile
 
