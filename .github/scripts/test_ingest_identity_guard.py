@@ -14,10 +14,10 @@
 
 """The runtime guard on the shared identity library.
 
-Both ingests install that library from a floating `@main`, so what CI verified and what the
-production job resolved are two different snapshots. These tests cover the guard that closes
-the gap: the goldens each script carries, and that a drift takes the v2 write out rather than
-writing rows nothing can join.
+ingest_vllm_benchmarks installs that library from a floating `@main`, so what CI verified
+and what the production job resolved are two different snapshots. These tests cover the
+guard that closes the gap: the golden it carries, and that a drift takes the v2 write out
+rather than writing rows nothing can join.
 """
 
 from __future__ import annotations
@@ -54,22 +54,16 @@ def vllm_mod():
     return _load("ingest_vllm_benchmarks", utils=utils)
 
 
-@pytest.fixture(scope="module")
-def xml_mod():
-    return _load("ingest_xml_si", clickhouse_connect=types.ModuleType("clickhouse_connect"))
-
-
 # --- the goldens each writer carries ----------------------------------------------------
+# ingest_xml_si no longer carries its own goldens: schema-v2 for JUnit XML is written by
+# push-to-clickhouse.yaml calling torch-spyre's ingest-xml-to-clickhouse action, so the
+# identity contract for that path is torch-spyre's own to guard, not duplicated here.
 
 
 def test_vllm_goldens_hold_against_the_installed_library(vllm_mod):
     # The tripwire, checked against whatever snapshot is installed here. It is the same
     # constant the job evaluates, so CI cannot pass on goldens the ingest does not use.
     assert golden_drift(vllm_mod.IDENTITY_GOLDENS) == []
-
-
-def test_xml_si_goldens_hold_against_the_installed_library(xml_mod):
-    assert golden_drift(xml_mod.IDENTITY_GOLDENS) == []
 
 
 def test_every_golden_names_its_function_and_both_values(vllm_mod):
