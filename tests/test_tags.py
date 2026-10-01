@@ -22,7 +22,7 @@ from spyre_testing_plugin import tags
 
 def _tags(pairs):
     assert {n for n, _ in pairs} <= {"tag"}
-    return [v for _, v in pairs]
+    return [v for _, v in pairs if not v.startswith("platform__")]
 
 
 def test_declared_tiers_dedups_and_sorts(monkeypatch):
@@ -87,3 +87,19 @@ def test_tag_values_match_the_ingest_namespace_form(monkeypatch):
     for name, value in tags.result_tags({"model": "ibm/granite"}):
         assert name == "tag"
         assert re.fullmatch(r"[a-z_]+__\S+", value), value
+
+
+@pytest.mark.parametrize(
+    "machine, expected",
+    [("x86_64", "platform__x86_64"), ("ppc64le", "platform__ppc64le"), ("", "platform__unknown")],
+)
+def test_platform_tag_matches_torch_spyre_normalization(monkeypatch, machine, expected):
+    monkeypatch.setattr(tags.platform, "machine", lambda: machine)
+    assert tags.platform_tag() == expected
+
+
+def test_platform_tag_is_emitted_even_without_tier_or_model(monkeypatch):
+    monkeypatch.delenv("SPYRE_TEST_TIERS", raising=False)
+    monkeypatch.delenv("SPYRE_TEST_TIER", raising=False)
+    monkeypatch.setattr(tags.platform, "machine", lambda: "s390x")
+    assert tags.result_tags({}) == [("tag", "platform__s390x")]
