@@ -15,9 +15,12 @@
 """Tier tags emitted into JUnit properties, which the ingest hashes into test_case_id."""
 
 import re
+import xml.etree.ElementTree as ET
 
 import pytest
 from spyre_testing_plugin import tags
+
+pytest_plugins = ["pytester"]
 
 
 def _tags(pairs):
@@ -103,3 +106,62 @@ def test_platform_tag_is_emitted_even_without_tier_or_model(monkeypatch):
     monkeypatch.delenv("SPYRE_TEST_TIER", raising=False)
     monkeypatch.setattr(tags.platform, "machine", lambda: "s390x")
     assert tags.result_tags({}) == [("tag", "platform__s390x")]
+
+
+def _tagged_in(junit_path):
+    """{testcase name: whether it carries a `tag` property} from a JUnit XML file."""
+    tree = ET.parse(junit_path)
+    return {
+        tc.get("name"): any(p.get("name") == "tag" for p in tc.iter("property"))
+        for tc in tree.iter("testcase")
+    }
+
+
+def test_collection_time_tagging_survives_skip_and_setup_error(pytester):
+    """A FUNCTION-scoped autouse fixture never runs for a marked skip or when an
+    earlier fixture already failed, so a helper-only test of result_tags() cannot
+    see this: tagging has to happen in pytest_collection_modifyitems, as
+    tests/conftest.py now does, or these cases silently lose their tags."""
+    pytester.makeconftest(
+        """
+        import pytest
+        from spyre_testing_plugin.tags import result_tags
+
+        def pytest_collection_modifyitems(items):
+            for item in items:
+                params = getattr(getattr(item, "callspec", None), "params", {})
+                for name, value in result_tags(params):
+                    item.user_properties.append((name, value))
+
+        def pytest_addoption(parser):
+            parser.addoption("--boom", action="store_true", default=False)
+
+        @pytest.fixture(scope="session", autouse=True)
+        def _fail_once(request):
+            if request.config.getoption("--boom"):
+                raise RuntimeError("boom")
+            yield
+        """
+    )
+    pytester.makepyfile(
+        """
+        import pytest
+
+        def test_passes():
+            assert True
+
+        @pytest.mark.skip(reason="marker skip")
+        def test_marker_skip():
+            assert True
+        """
+    )
+
+    result = pytester.runpytest("--junitxml=result.xml")
+    result.assert_outcomes(passed=1, skipped=1)
+    tagged = _tagged_in(pytester.path / "result.xml")
+    assert tagged == {"test_passes": True, "test_marker_skip": True}
+
+    result = pytester.runpytest("--junitxml=result_boom.xml", "--boom")
+    result.assert_outcomes(errors=1, skipped=1)
+    tagged = _tagged_in(pytester.path / "result_boom.xml")
+    assert tagged == {"test_passes": True, "test_marker_skip": True}
