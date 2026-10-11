@@ -12,12 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Downloads and unzips a run's junit-* and run-id/artifact-id artifacts, one subdir each."""
+"""Downloads+unzips a run's junit-* and id-sidecar artifacts, retrying and skipping bad ones."""
 
 import argparse
 import json
 import os
+import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 ID_ARTIFACTS = {"run-id", "artifact-id"}
@@ -27,17 +30,30 @@ def wanted(artifact: dict) -> bool:
     return artifact["name"].startswith("junit-") or artifact["name"] in ID_ARTIFACTS
 
 
-def download_and_extract(repo: str, artifact: dict, out_dir: Path) -> None:
-    zip_path = out_dir / f"{artifact['name']}.zip"
-    result = subprocess.run(
-        ["gh", "api", f"/repos/{repo}/actions/artifacts/{artifact['id']}/zip"],
-        stdout=subprocess.PIPE,
-        check=True,
-    )
-    zip_path.write_bytes(result.stdout)
-    subprocess.run(
-        ["unzip", "-o", str(zip_path), "-d", str(out_dir / artifact["name"])], check=True
-    )
+def fetch(repo: str, artifact: dict, zip_path: Path, dest: Path, attempts: int) -> bool:
+    """Download and unzip one artifact; retried whole, since a truncated zip only fails at unzip."""
+    for attempt in range(1, attempts + 1):
+        shutil.rmtree(dest, ignore_errors=True)
+        for cmd in (
+            ["gh", "api", f"/repos/{repo}/actions/artifacts/{artifact['id']}/zip"],
+            ["unzip", "-q", "-o", str(zip_path), "-d", str(dest)],
+        ):
+            result = subprocess.run(cmd, capture_output=True)
+            if result.returncode != 0:
+                err = (result.stderr or result.stdout[-500:]).decode(errors="replace").strip()
+                print(
+                    f"[retry] {artifact['name']}: {cmd[0]} attempt {attempt}/{attempts} "
+                    f"exited {result.returncode}: {err}"
+                )
+                break
+            if cmd[0] == "gh":
+                zip_path.write_bytes(result.stdout)
+        else:
+            return True
+        if attempt < attempts:
+            time.sleep(2**attempt)
+    shutil.rmtree(dest, ignore_errors=True)
+    return False
 
 
 def main() -> None:
@@ -53,14 +69,28 @@ def main() -> None:
         help="owner/repo the artifacts belong to (default: $GITHUB_REPOSITORY)",
     )
     parser.add_argument("--out-dir", default="xml_artifacts", type=Path)
+    parser.add_argument("--attempts", default=4, type=int)
     args = parser.parse_args()
     if not args.repo:
         parser.error("--repo is required when $GITHUB_REPOSITORY is unset")
 
+    artifacts = [a for a in json.loads(args.artifacts) if wanted(a)]
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    for a in filter(wanted, json.loads(args.artifacts)):
+    failed = []
+    for a in artifacts:
         print(f"Downloading: {a['name']} (id={a['id']})")
-        download_and_extract(args.repo, a, args.out_dir)
+        # Own subdir per artifact so same-basename XMLs never clobber; ingest globs recursively.
+        dest = args.out_dir / a["name"]
+        if not fetch(args.repo, a, args.out_dir / f"{a['name']}.zip", dest, args.attempts):
+            print(
+                f"::warning::Skipping artifact {a['name']} (id={a['id']}): "
+                f"download/unzip failed {args.attempts} times; its results are not ingested."
+            )
+            failed.append(a["name"])
+    print(f"Fetched {len(artifacts) - len(failed)}/{len(artifacts)} artifact(s).")
+    if artifacts and len(failed) == len(artifacts):
+        print("::error::No artifact could be downloaded.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
