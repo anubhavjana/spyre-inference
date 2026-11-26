@@ -20,7 +20,7 @@ on:
         type: string
         default: ''
       runner_label:
-        description: Standing runner-set label to target; empty = the default 4-card set
+        description: Image label of the runner set to run in; the card label is fixed at 4
         required: false
         type: string
         default: ''
@@ -60,6 +60,10 @@ on:
         required: false
         type: boolean
         default: true
+  # One hardware-free run registers this path, which is what makes the dispatch API resolve it by ref.
+  push:
+    branches: ['bench/**']
+    paths: ['.github/workflows/bench-on-demand.yml']
 
 concurrency:
   group: bench-on-demand-${{ inputs.selection || 'nightly-f1' }}-${{ inputs.purpose || 'on-demand' }}
@@ -84,10 +88,39 @@ env:
   BENCH_PLAN_FILE: bench-results/plan/plan.json
 
 jobs:
+  # Proves the dispatch contract without a card: an input the orchestrator maps to but this file
+  # omits 422s the whole dispatch, and this is the job whose run registers the path.
+  definition:
+    name: Definition check (no cards)
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          sparse-checkout: .github/workflows/bench-on-demand.yml
+          sparse-checkout-cone-mode: false
+      - name: Every input the bench cell maps to is declared here
+        run: |
+          set -euo pipefail
+          pip install --quiet pyyaml
+          python3 - <<'PY'
+          import sys, yaml
+          # pipelines/config/bench/jenkins-binding.yaml amd64_dispatch.inputs, plus what the cell's map adds.
+          want = {"ref", "repository", "runner_label", "prebaked_image", "run_id",
+                  "purpose", "test_type", "selection", "clickhouse_env"}
+          doc = yaml.safe_load(open(".github/workflows/bench-on-demand.yml"))
+          got = set(doc[True if True in doc else "on"]["workflow_dispatch"]["inputs"])
+          missing = sorted(want - got)
+          print("declared:", " ".join(sorted(got)))
+          sys.exit(f"::error::undeclared dispatch inputs: {missing}" if missing else 0)
+          PY
+
   bench:
     name: ${{ inputs.selection || 'nightly-f1' }} (advisory)
-    # The 4-card set by default: half the catalog is TP4, which a 1-card leg plans as skip/capacity.
-    runs-on: ${{ inputs.runner_label != '' && fromJSON(format('["{0}"]', inputs.runner_label)) || fromJSON('["x86_64","spyre_pf_x4","linux","image_torch_spyre"]') }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    # runner_label is the image label alone; the card label stays here, so a TP4 case keeps 4 cards.
+    runs-on: ${{ fromJSON(format('["x86_64","spyre_pf_x4","linux","{0}"]', inputs.runner_label || 'image_torch_spyre')) }}
     timeout-minutes: 480
     continue-on-error: true
     env:
